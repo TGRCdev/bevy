@@ -1,3 +1,5 @@
+use core::{error::Error, fmt::Display, convert::Infallible};
+
 use crate::entity::{hash_set::EntityHashSet, Entity};
 use alloc::vec::Vec;
 use smallvec::SmallVec;
@@ -29,12 +31,14 @@ pub trait RelationshipSourceCollection {
     /// Not all collections support this operation, in which case it is a no-op.
     fn reserve(&mut self, additional: usize);
 
+    type AddError: Error;
+
     /// Adds the given `entity` to the collection.
     ///
     /// Returns whether the entity was added to the collection.
     /// Mainly useful when dealing with collections that don't allow
     /// multiple instances of the same entity ([`EntityHashSet`]).
-    fn add(&mut self, entity: Entity) -> bool;
+    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError>;
 
     /// Removes the given `entity` from the collection.
     ///
@@ -128,6 +132,7 @@ pub trait OrderedRelationshipSourceCollection: RelationshipSourceCollection {
 
 impl RelationshipSourceCollection for Vec<Entity> {
     type SourceIter<'a> = core::iter::Copied<core::slice::Iter<'a, Entity>>;
+    type AddError = Infallible;
 
     fn new() -> Self {
         Vec::new()
@@ -141,10 +146,10 @@ impl RelationshipSourceCollection for Vec<Entity> {
         Vec::with_capacity(capacity)
     }
 
-    fn add(&mut self, entity: Entity) -> bool {
+    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError> {
         Vec::push(self, entity);
 
-        true
+        Ok(true)
     }
 
     fn remove(&mut self, entity: Entity) -> bool {
@@ -230,6 +235,7 @@ impl OrderedRelationshipSourceCollection for Vec<Entity> {
 
 impl RelationshipSourceCollection for EntityHashSet {
     type SourceIter<'a> = core::iter::Copied<crate::entity::hash_set::Iter<'a>>;
+    type AddError = Infallible;
 
     fn new() -> Self {
         EntityHashSet::new()
@@ -243,8 +249,8 @@ impl RelationshipSourceCollection for EntityHashSet {
         EntityHashSet::with_capacity(capacity)
     }
 
-    fn add(&mut self, entity: Entity) -> bool {
-        self.insert(entity)
+    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError> {
+        Ok(self.insert(entity))
     }
 
     fn remove(&mut self, entity: Entity) -> bool {
@@ -276,6 +282,7 @@ impl RelationshipSourceCollection for EntityHashSet {
 
 impl<const N: usize> RelationshipSourceCollection for SmallVec<[Entity; N]> {
     type SourceIter<'a> = core::iter::Copied<core::slice::Iter<'a, Entity>>;
+    type AddError = Infallible;
 
     fn new() -> Self {
         SmallVec::new()
@@ -289,10 +296,10 @@ impl<const N: usize> RelationshipSourceCollection for SmallVec<[Entity; N]> {
         SmallVec::with_capacity(capacity)
     }
 
-    fn add(&mut self, entity: Entity) -> bool {
+    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError> {
         SmallVec::push(self, entity);
 
-        true
+        Ok(true)
     }
 
     fn remove(&mut self, entity: Entity) -> bool {
@@ -325,8 +332,23 @@ impl<const N: usize> RelationshipSourceCollection for SmallVec<[Entity; N]> {
     }
 }
 
+#[derive(Debug)]
+pub struct OneEntityAddError {
+    pub current: Entity,
+    pub attempted: Entity,
+}
+
+impl Display for OneEntityAddError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_fmt(format_args!("Tried to add a second entity to a one-to-* relationship (Currently {}, Tried {})", self.current, self.attempted))
+    }
+}
+
+impl Error for OneEntityAddError {}
+
 impl RelationshipSourceCollection for Entity {
     type SourceIter<'a> = core::iter::Once<Entity>;
+    type AddError = OneEntityAddError;
 
     fn new() -> Self {
         Entity::PLACEHOLDER
@@ -338,10 +360,14 @@ impl RelationshipSourceCollection for Entity {
         Self::new()
     }
 
-    fn add(&mut self, entity: Entity) -> bool {
+    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError> {
+        if *self == Entity::PLACEHOLDER {
+            return Err(OneEntityAddError { current: *self, attempted: entity });
+        }
+        
         *self = entity;
 
-        true
+        Ok(true)
     }
 
     fn remove(&mut self, entity: Entity) -> bool {
