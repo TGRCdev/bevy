@@ -1,8 +1,17 @@
-use core::{error::Error, fmt::Display, convert::Infallible};
-
+use core::iter::Empty;
 use crate::entity::{hash_set::EntityHashSet, Entity};
 use alloc::vec::Vec;
 use smallvec::SmallVec;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum RelationshipSourceError {
+    #[error("the relationship's source collection is full")]
+    CollectionFull,
+
+    #[error("the target is already part of a *-to-one relationship with entity {0}")]
+    OneSourceFull(Entity),
+}
 
 /// The internal [`Entity`] collection used by a [`RelationshipTarget`](crate::relationship::RelationshipTarget) component.
 /// This is not intended to be modified directly by users, as it could invalidate the correctness of relationships.
@@ -31,14 +40,12 @@ pub trait RelationshipSourceCollection {
     /// Not all collections support this operation, in which case it is a no-op.
     fn reserve(&mut self, additional: usize);
 
-    type AddError: Error;
-
     /// Adds the given `entity` to the collection.
     ///
     /// Returns whether the entity was added to the collection.
     /// Mainly useful when dealing with collections that don't allow
     /// multiple instances of the same entity ([`EntityHashSet`]).
-    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError>;
+    fn add(&mut self, entity: Entity) -> Result<bool, RelationshipSourceError>;
 
     /// Removes the given `entity` from the collection.
     ///
@@ -69,12 +76,17 @@ pub trait RelationshipSourceCollection {
     /// Add multiple entities to collection at once.
     ///
     /// May be faster than repeatedly calling [`Self::add`].
-    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) {
+    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) -> Result<(), (RelationshipSourceError, impl IntoIterator<Item = Entity>)> {
         // The method name shouldn't conflict with `Extend::extend` as it's in the rust prelude and
         // would always conflict with it.
-        for entity in entities {
-            self.add(entity);
+        let mut iter = entities.into_iter();
+        while let Some(entity) = iter.next() {
+            if let Err(e) = self.add(entity) {
+                return Err((e, core::iter::once(entity).chain(iter)));
+            }
         }
+
+        Ok(())
     }
 }
 
@@ -132,7 +144,6 @@ pub trait OrderedRelationshipSourceCollection: RelationshipSourceCollection {
 
 impl RelationshipSourceCollection for Vec<Entity> {
     type SourceIter<'a> = core::iter::Copied<core::slice::Iter<'a, Entity>>;
-    type AddError = Infallible;
 
     fn new() -> Self {
         Vec::new()
@@ -146,7 +157,7 @@ impl RelationshipSourceCollection for Vec<Entity> {
         Vec::with_capacity(capacity)
     }
 
-    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError> {
+    fn add(&mut self, entity: Entity) -> Result<bool, RelationshipSourceError> {
         Vec::push(self, entity);
 
         Ok(true)
@@ -177,8 +188,9 @@ impl RelationshipSourceCollection for Vec<Entity> {
         Vec::shrink_to_fit(self);
     }
 
-    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) {
+    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) -> Result<(), (RelationshipSourceError, impl IntoIterator<Item = Entity>)> {
         self.extend(entities);
+        Ok::<(), (_, Empty<Entity>)>(())
     }
 }
 
@@ -235,7 +247,6 @@ impl OrderedRelationshipSourceCollection for Vec<Entity> {
 
 impl RelationshipSourceCollection for EntityHashSet {
     type SourceIter<'a> = core::iter::Copied<crate::entity::hash_set::Iter<'a>>;
-    type AddError = Infallible;
 
     fn new() -> Self {
         EntityHashSet::new()
@@ -249,7 +260,7 @@ impl RelationshipSourceCollection for EntityHashSet {
         EntityHashSet::with_capacity(capacity)
     }
 
-    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError> {
+    fn add(&mut self, entity: Entity) -> Result<bool, RelationshipSourceError> {
         Ok(self.insert(entity))
     }
 
@@ -275,14 +286,14 @@ impl RelationshipSourceCollection for EntityHashSet {
         self.0.shrink_to_fit();
     }
 
-    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) {
+    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) -> Result<(), (RelationshipSourceError, impl IntoIterator<Item = Entity>)> {
         self.extend(entities);
+        Ok::<_, (_, Empty<Entity>)>(())
     }
 }
 
 impl<const N: usize> RelationshipSourceCollection for SmallVec<[Entity; N]> {
     type SourceIter<'a> = core::iter::Copied<core::slice::Iter<'a, Entity>>;
-    type AddError = Infallible;
 
     fn new() -> Self {
         SmallVec::new()
@@ -296,7 +307,7 @@ impl<const N: usize> RelationshipSourceCollection for SmallVec<[Entity; N]> {
         SmallVec::with_capacity(capacity)
     }
 
-    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError> {
+    fn add(&mut self, entity: Entity) -> Result<bool, RelationshipSourceError> {
         SmallVec::push(self, entity);
 
         Ok(true)
@@ -327,28 +338,14 @@ impl<const N: usize> RelationshipSourceCollection for SmallVec<[Entity; N]> {
         SmallVec::shrink_to_fit(self);
     }
 
-    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) {
+    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) -> Result<(), (RelationshipSourceError, impl IntoIterator<Item = Entity>)> {
         self.extend(entities);
+        Ok::<_, (_, Empty<Entity>)>(())
     }
 }
-
-#[derive(Debug)]
-pub struct OneEntityAddError {
-    pub current: Entity,
-    pub attempted: Entity,
-}
-
-impl Display for OneEntityAddError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_fmt(format_args!("Tried to add a second entity to a one-to-* relationship (Currently {}, Tried {})", self.current, self.attempted))
-    }
-}
-
-impl Error for OneEntityAddError {}
 
 impl RelationshipSourceCollection for Entity {
     type SourceIter<'a> = core::iter::Once<Entity>;
-    type AddError = OneEntityAddError;
 
     fn new() -> Self {
         Entity::PLACEHOLDER
@@ -360,9 +357,9 @@ impl RelationshipSourceCollection for Entity {
         Self::new()
     }
 
-    fn add(&mut self, entity: Entity) -> Result<bool, Self::AddError> {
+    fn add(&mut self, entity: Entity) -> Result<bool, RelationshipSourceError> {
         if *self == Entity::PLACEHOLDER {
-            return Err(OneEntityAddError { current: *self, attempted: entity });
+            return Err(RelationshipSourceError::OneSourceFull(entity));
         }
         
         *self = entity;
@@ -397,10 +394,19 @@ impl RelationshipSourceCollection for Entity {
 
     fn shrink_to_fit(&mut self) {}
 
-    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) {
-        if let Some(entity) = entities.into_iter().last() {
-            *self = entity;
+    fn extend_from_iter(&mut self, entities: impl IntoIterator<Item = Entity>) -> Result<(), (RelationshipSourceError, impl IntoIterator<Item = Entity>)> {
+        let mut iter = entities.into_iter().peekable();
+        if *self == Entity::PLACEHOLDER {
+            if let Some(ent) = iter.next() {
+                *self = ent;
+            }
         }
+
+        if iter.peek().is_some() {
+            return Err((RelationshipSourceError::OneSourceFull(*self), iter));
+        }
+
+        Ok(())
     }
 }
 
